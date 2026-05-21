@@ -1,5 +1,5 @@
 name: Force Appwrite redeploy
-description: Toggles a .redeploy marker file on main and pushes — triggers Appwrite's git auto-deploy to rebuild the function with current env vars.
+description: Merges staging into main, then toggles a .redeploy marker file and pushes — triggers Appwrite's git auto-deploy to rebuild the function with fresh code + current env vars.
 inputs:
   token:
     description: GitHub token with `repo` scope. Pass secrets.GH_DISPATCH_TOKEN.
@@ -19,6 +19,17 @@ runs:
       run: |
         git config user.name  "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Merge staging into main
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch origin staging
+        echo "Merging origin/staging into main"
+        git merge --ff-only origin/staging || {
+          echo "fast-forward failed; falling back to no-ff merge commit"
+          git merge --no-ff origin/staging -m "Merge staging into main (force redeploy)"
+        }
 
     - name: Toggle .redeploy marker and push
       shell: bash
