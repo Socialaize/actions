@@ -1,0 +1,9 @@
+{
+  "name": "sync-fn",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "js-yaml": "^4.1.1",
+    "node-appwrite": "^25.2.0"
+  }
+}

@@ -1,0 +1,52 @@
+name: Sync Appwrite function
+description: Push .fnconfig.yml metadata (and optionally a code deployment) to Appwrite for a function repo
+inputs:
+  mode:
+    description: '"spec" (metadata only) or "deploy" (metadata + tarball upload)'
+    required: false
+    default: spec
+  activate:
+    description: 'In deploy mode, set "true" to activate the deployment immediately'
+    required: false
+    default: 'false'
+  appwrite-endpoint:
+    description: Appwrite endpoint URL
+    required: true
+  appwrite-project-id:
+    description: Appwrite project ID
+    required: true
+  appwrite-api-key:
+    description: Appwrite API key with functions.write scope
+    required: true
+  function-id:
+    description: Override Appwrite function ID (defaults to $id in .fnconfig.yml)
+    required: false
+    default: ''
+  fnconfig-path:
+    description: Path to .fnconfig.yml relative to the caller workspace
+    required: false
+    default: .fnconfig.yml
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: Install sync-fn dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: bun install --frozen-lockfile
+
+    - name: Run sync-fn
+      shell: bash
+      env:
+        APPWRITE_ENDPOINT: ${{ inputs.appwrite-endpoint }}
+        APPWRITE_PROJECT_ID: ${{ inputs.appwrite-project-id }}
+        APPWRITE_API_KEY: ${{ inputs.appwrite-api-key }}
+        APPWRITE_FUNCTION_ID: ${{ inputs.function-id }}
+        FNCONFIG_PATH: ${{ inputs.fnconfig-path }}
+        ACTIVATE: ${{ inputs.activate }}
+      run: bun "${{ github.action_path }}/sync-fn.mjs" --mode "${{ inputs.mode }}"
