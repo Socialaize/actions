@@ -30,15 +30,15 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Set up Bun
-      uses: oven-sh/setup-bun@v2
+    - name: Set up Node
+      uses: actions/setup-node@v4
       with:
-        bun-version: latest
+        node-version: '22'
 
     - name: Install sync-fn dependencies
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: bun install --frozen-lockfile
+      run: npm install --no-audit --no-fund --ignore-scripts
 
     - name: Run sync-fn
       shell: bash
@@ -49,4 +49,4 @@ runs:
         APPWRITE_FUNCTION_ID: ${{ inputs.function-id }}
         FNCONFIG_PATH: ${{ inputs.fnconfig-path }}
         ACTIVATE: ${{ inputs.activate }}
-      run: bun "${{ github.action_path }}/sync-fn.mjs" --mode "${{ inputs.mode }}"
+      run: node "${{ github.action_path }}/sync-fn.mjs" --mode "${{ inputs.mode }}"
