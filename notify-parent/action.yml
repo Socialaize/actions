@@ -1,0 +1,31 @@
+name: Notify parent of branch update
+description: Dispatches a repository_dispatch event to Socialaize/Socialaize so the parent can bump its submodule pointer for this function repo.
+inputs:
+  parent-repo:
+    description: Owner/repo of the parent to notify (e.g. Socialaize/Socialaize)
+    required: false
+    default: Socialaize/Socialaize
+  token:
+    description: GitHub token with `repo` scope on the parent. Pass secrets.GH_DISPATCH_TOKEN.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch repository_dispatch to parent
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PARENT_REPO: ${{ inputs.parent-repo }}
+        REPO_NAME: ${{ github.event.repository.name }}
+        BRANCH: ${{ github.ref_name }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        REPO_LOWER="$(printf '%s' "$REPO_NAME" | tr '[:upper:]' '[:lower:]')"
+        EVENT_TYPE="${REPO_LOWER}-${BRANCH}-updated"
+        gh api -X POST "repos/${PARENT_REPO}/dispatches" \
+          -f "event_type=$EVENT_TYPE" \
+          -f "client_payload[child_name]=$REPO_NAME" \
+          -f "client_payload[branch]=$BRANCH" \
+          -f "client_payload[sha]=$SHA"

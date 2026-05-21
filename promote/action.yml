@@ -1,0 +1,81 @@
+name: Promote function staging to main
+description: |
+  Syncs .fnconfig.yml to Appwrite (so the spec is updated BEFORE Appwrite's
+  git auto-deploy fires), then fast-forwards main to the staging tip and
+  pushes. Appwrite then builds the new main commit against the now-correct
+  spec and auto-activates the resulting deployment.
+inputs:
+  commit-sha:
+    description: SHA to merge into main. Defaults to origin/staging tip.
+    required: false
+    default: ''
+  token:
+    description: GitHub token with `repo` scope. Pass secrets.GH_DISPATCH_TOKEN.
+    required: true
+  appwrite-endpoint:
+    description: Appwrite endpoint URL
+    required: true
+  appwrite-project-id:
+    description: Appwrite project ID
+    required: true
+  appwrite-api-key:
+    description: Appwrite API key (functions.write)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout main
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        fetch-depth: 0
+        token: ${{ inputs.token }}
+
+    - name: Configure git identity
+      shell: bash
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Fetch staging tip
+      shell: bash
+      env:
+        STAGING_SHA: ${{ inputs.commit-sha }}
+      run: |
+        set -euo pipefail
+        git fetch origin staging
+        TARGET="${STAGING_SHA:-origin/staging}"
+        echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+
+    - name: Check out staging .fnconfig.yml for sync
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Grab the staging-tip .fnconfig.yml without changing the checked-out
+        # ref (we're on main; sync needs to push the staging spec).
+        git show "${TARGET}:.fnconfig.yml" > .fnconfig.staging.yml
+
+    - name: Sync function spec to Appwrite (from staging tip)
+      uses: Socialaize/actions/sync-fn@main
+      with:
+        mode: spec
+        appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
+        appwrite-project-id: ${{ inputs.appwrite-project-id }}
+        appwrite-api-key: ${{ inputs.appwrite-api-key }}
+        fnconfig-path: .fnconfig.staging.yml
+
+    - name: Clean up staging fnconfig artifact
+      shell: bash
+      run: rm -f .fnconfig.staging.yml
+
+    - name: Merge staging into main
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Merging $TARGET into main"
+        git merge --ff-only "$TARGET" || {
+          echo "fast-forward failed; falling back to no-ff merge commit"
+          git merge --no-ff "$TARGET" -m "Promote staging to main (${TARGET})"
+        }
+        git push origin main
