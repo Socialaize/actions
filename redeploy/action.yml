@@ -1,8 +1,22 @@
 name: Force Appwrite redeploy
-description: Merges staging into main, then toggles a .redeploy marker file and pushes — triggers Appwrite's git auto-deploy to rebuild the function with fresh code + current env vars.
+description: |
+  Merges staging into main, pushes, then uploads + activates a fresh
+  deployment via the Appwrite API. The API-driven activate is what
+  guarantees the new build replaces the live deployment — Appwrite's VCS
+  auto-deploy lands every push in silent mode (activate=false), so we
+  cannot rely on the push alone.
 inputs:
   token:
     description: GitHub token with `repo` scope. Pass secrets.GH_DISPATCH_TOKEN.
+    required: true
+  appwrite-endpoint:
+    description: Appwrite endpoint URL
+    required: true
+  appwrite-project-id:
+    description: Appwrite project ID
+    required: true
+  appwrite-api-key:
+    description: Appwrite API key (functions.write)
     required: true
 
 runs:
@@ -30,18 +44,13 @@ runs:
           echo "fast-forward failed; falling back to no-ff merge commit"
           git merge --no-ff origin/staging -m "Merge staging into main (force redeploy)"
         }
-
-    - name: Toggle .redeploy marker and push
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ -f .redeploy ]; then
-          rm .redeploy
-          MSG="force redeploy: clear marker"
-        else
-          date -u +%FT%TZ > .redeploy
-          MSG="force redeploy: set marker"
-        fi
-        git add .redeploy
-        git commit -m "$MSG"
         git push origin main
+
+    - name: Deploy + activate via Appwrite API
+      uses: Socialaize/actions/sync-fn@main
+      with:
+        mode: deploy
+        activate: 'true'
+        appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
+        appwrite-project-id: ${{ inputs.appwrite-project-id }}
+        appwrite-api-key: ${{ inputs.appwrite-api-key }}

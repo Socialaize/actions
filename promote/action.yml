@@ -1,9 +1,10 @@
 name: Promote function staging to main
 description: |
-  Syncs .fnconfig.yml to Appwrite (so the spec is updated BEFORE Appwrite's
-  git auto-deploy fires), then fast-forwards main to the staging tip and
-  pushes. Appwrite then builds the new main commit against the now-correct
-  spec and auto-activates the resulting deployment.
+  Syncs .fnconfig.yml to Appwrite, fast-forwards main to the staging tip and
+  pushes, then uploads + activates a deployment via the Appwrite API. We
+  drive the deployment ourselves rather than relying on Appwrite's VCS
+  auto-deploy — it lands every deployment in silent mode (activate=false),
+  which is the bug this action exists to work around.
 inputs:
   commit-sha:
     description: SHA to merge into main. Defaults to origin/staging tip.
@@ -79,3 +80,12 @@ runs:
           git merge --no-ff "$TARGET" -m "Promote staging to main (${TARGET})"
         }
         git push origin main
+
+    - name: Deploy + activate via Appwrite API
+      uses: Socialaize/actions/sync-fn@main
+      with:
+        mode: deploy
+        activate: 'true'
+        appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
+        appwrite-project-id: ${{ inputs.appwrite-project-id }}
+        appwrite-api-key: ${{ inputs.appwrite-api-key }}
