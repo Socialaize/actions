@@ -1,13 +1,18 @@
 name: Force Appwrite redeploy
 description: |
-  Merges staging into main, pushes, then uploads + activates a fresh
-  deployment via the Appwrite API. The API-driven activate is what
-  guarantees the new build replaces the live deployment — Appwrite's VCS
-  auto-deploy lands every push in silent mode (activate=false), so we
-  cannot rely on the push alone.
+  Merges staging into main, pushes, builds the function inside GitHub
+  Actions (so we can authenticate to GitHub Packages with the caller
+  workflow's GITHUB_TOKEN), then uploads + activates a prebuilt
+  deployment via the Appwrite API. The build runs in Actions because
+  the Appwrite build container has no GitHub Packages credentials —
+  the committed `.npmrc` referencing `${GH_TOKEN}` is not expanded by
+  bun, and per-function Appwrite variables don't include GH_TOKEN.
+
+  Caller workflows MUST grant `packages: read` permission so the
+  composite can use `github.token` against npm.pkg.github.com.
 inputs:
   token:
-    description: GitHub token with `repo` scope. Pass secrets.GH_DISPATCH_TOKEN.
+    description: GitHub token with `repo` scope for the git merge/push (e.g. GH_DISPATCH_TOKEN).
     required: true
   appwrite-endpoint:
     description: Appwrite endpoint URL
@@ -22,7 +27,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         ref: main
         fetch-depth: 0
@@ -46,11 +51,59 @@ runs:
         }
         git push origin main
 
-    - name: Deploy + activate via Appwrite API
-      uses: Socialaize/actions/sync-fn@main
+    - name: Write .npmrc for npm.pkg.github.com auth
+      shell: bash
+      env:
+        NPM_TOKEN: ${{ github.token }}
+      run: |
+        cat > .npmrc <<EOF
+        @socialaize:registry=https://npm.pkg.github.com
+        //npm.pkg.github.com/:_authToken=${NPM_TOKEN}
+        EOF
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+
+    - name: Setup Node
+      uses: actions/setup-node@v6
       with:
-        mode: deploy
-        activate: 'true'
-        appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
-        appwrite-project-id: ${{ inputs.appwrite-project-id }}
-        appwrite-api-key: ${{ inputs.appwrite-api-key }}
+        node-version: '22'
+
+    - name: Install + (optional) build function deps
+      shell: bash
+      env:
+        NODE_OPTIONS: '--max-old-space-size=4096'
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [ -f .fnconfig.yml ]; then
+          cmd="$(yq -r '.commands // ""' .fnconfig.yml 2>/dev/null || echo '')"
+          if [ -n "$cmd" ]; then
+            echo "Running .fnconfig commands: $cmd"
+            bash -c "$cmd"
+          fi
+        fi
+        if [ ! -d node_modules ]; then
+          if [ -f bun.lock ] || [ -f bun.lockb ]; then
+            bun add @socialaize/shared@latest
+            bun install
+          elif [ -f package.json ]; then
+            npm install @socialaize/shared@latest
+            npm install
+          fi
+        fi
+
+    - name: Remove .npmrc before packaging
+      shell: bash
+      run: rm -f .npmrc
+
+    - name: Deploy + activate (prebuilt) via Appwrite API
+      uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        endpoint: ${{ inputs.appwrite-endpoint }}
+        project-id: ${{ inputs.appwrite-project-id }}
+        api-key: ${{ inputs.appwrite-api-key }}
+        prebuilt: 'true'
+        commands: ':'
