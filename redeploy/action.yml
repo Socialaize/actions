@@ -73,7 +73,10 @@ runs:
       shell: bash
       env:
         NODE_OPTIONS: '--max-old-space-size=4096'
-        GH_TOKEN: ${{ github.token }}
+        # Use the caller's PAT (GH_DISPATCH_TOKEN) — has cross-repo Contents:read so
+        # Python build.sh can `git clone Socialaize/Socialaize` for socialaize-shared-py.
+        # github.token only scopes to the calling repo, which 404s the cross-repo clone.
+        GH_TOKEN: ${{ inputs.token }}
         # Appwrite open-runtimes for bun-* and node-* use Alpine (musl), not glibc.
         # Force npm/bun to install the linuxmusl-x64 native variants (e.g. sharp's
         # @img/sharp-linuxmusl-x64) so the tarball boots in Appwrite's container.
