@@ -74,6 +74,15 @@ runs:
       env:
         NODE_OPTIONS: '--max-old-space-size=4096'
         GH_TOKEN: ${{ github.token }}
+        # Appwrite open-runtimes for bun-* and node-* use Alpine (musl), not glibc.
+        # Force npm/bun to install the linuxmusl-x64 native variants (e.g. sharp's
+        # @img/sharp-linuxmusl-x64) so the tarball boots in Appwrite's container.
+        npm_config_platform: linux
+        npm_config_libc: musl
+        npm_config_arch: x64
+        npm_config_target_platform: linux
+        npm_config_target_libc: musl
+        npm_config_target_arch: x64
       run: |
         set -euo pipefail
         if [ -f .fnconfig.yml ]; then
