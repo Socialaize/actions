@@ -1,0 +1,180 @@
+name: Force Appwrite redeploy
+description: |
+  Merges staging into main, pushes, then deploys to Appwrite.
+
+  TypeScript functions are built **inside GitHub Actions** so the caller's
+  GitHub token can auth to npm.pkg.github.com (private @socialaize scope).
+  Appwrite skips its own build for these (prebuilt: true, commands: ':').
+
+  Python functions are built **inside the Appwrite container** (prebuilt:
+  false). The local GH runner is Ubuntu/glibc but Appwrite runs Alpine/musl,
+  so any venv produced in Actions ships non-portable Python binaries. The
+  function's project-level Appwrite GH_TOKEN secret handles cross-repo git
+  clones of @socialaize/shared-py inside the container.
+
+  Caller workflows MUST grant `packages: read` permission so the composite
+  can use `github.token` against npm.pkg.github.com (TS path).
+inputs:
+  token:
+    description: GitHub token with `repo` scope for the git merge/push (e.g. GH_DISPATCH_TOKEN).
+    required: true
+  appwrite-endpoint:
+    description: Appwrite endpoint URL
+    required: true
+  appwrite-project-id:
+    description: Appwrite project ID
+    required: true
+  appwrite-api-key:
+    description: Appwrite API key (functions.write)
+    required: true
+  zregistry-client-id:
+    description: ZRegistry/ZAuth OIDC client id (client_credentials) for the @zlogging scope on the TS path.
+    required: false
+  zregistry-client-secret:
+    description: ZRegistry/ZAuth OIDC client secret for the @zlogging scope on the TS path.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: main
+        fetch-depth: 0
+        token: ${{ inputs.token }}
+
+    - name: Configure git identity
+      shell: bash
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Merge staging into main
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch origin staging
+        echo "Merging origin/staging into main"
+        git merge --ff-only origin/staging || {
+          echo "fast-forward failed; falling back to no-ff merge commit"
+          git merge --no-ff origin/staging -m "Merge staging into main (force redeploy)"
+        }
+        git push origin main
+
+    - name: Detect runtime + select deploy mode
+      id: mode
+      shell: bash
+      run: |
+        set -euo pipefail
+        runtime=""
+        cmd=""
+        if [ -f .fnconfig.yml ]; then
+          runtime="$(yq -r '.runtime // ""' .fnconfig.yml 2>/dev/null || echo '')"
+          cmd="$(yq -r '.commands // ""' .fnconfig.yml 2>/dev/null || echo '')"
+        fi
+        echo "Detected runtime: $runtime"
+        echo "Detected commands: $cmd"
+        case "$runtime" in
+          python*|*python*)
+            is_python=true
+            ;;
+          *)
+            is_python=false
+            ;;
+        esac
+        echo "is_python=$is_python" >> "$GITHUB_OUTPUT"
+        # Quote commands for downstream consumers — empty string allowed.
+        {
+          echo 'commands<<EOF'
+          echo "$cmd"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Write .npmrc for npm.pkg.github.com auth (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      shell: bash
+      env:
+        NPM_TOKEN: ${{ github.token }}
+        ZREGISTRY_CLIENT_ID: ${{ inputs.zregistry-client-id }}
+        ZREGISTRY_CLIENT_SECRET: ${{ inputs.zregistry-client-secret }}
+      run: |
+        ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.publish' | jq -r .access_token)
+        cat > .npmrc <<NPMRC
+        @socialaize:registry=https://npm.pkg.github.com
+        //npm.pkg.github.com/:_authToken=${NPM_TOKEN}
+        @zlogging:registry=https://registry.blackleafdigital.com/npm/
+        //registry.blackleafdigital.com/npm/:_authToken=${ZREG_TOKEN}
+        NPMRC
+
+    - name: Setup Bun (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      uses: oven-sh/setup-bun@v2
+
+    - name: Setup Node (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+
+    - name: Install + (optional) build function deps (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      shell: bash
+      env:
+        NODE_OPTIONS: '--max-old-space-size=4096'
+        GH_TOKEN: ${{ inputs.token }}
+        # Appwrite open-runtimes for bun-* and node-* use Alpine (musl), not glibc.
+        # Force npm/bun to install the linuxmusl-x64 native variants (e.g. sharp's
+        # @img/sharp-linuxmusl-x64) so the tarball boots in Appwrite's container.
+        npm_config_platform: linux
+        npm_config_libc: musl
+        npm_config_arch: x64
+        npm_config_target_platform: linux
+        npm_config_target_libc: musl
+        npm_config_target_arch: x64
+      run: |
+        set -euo pipefail
+        if [ -f .fnconfig.yml ]; then
+          cmd="$(yq -r '.commands // ""' .fnconfig.yml 2>/dev/null || echo '')"
+          if [ -n "$cmd" ]; then
+            echo "Running .fnconfig commands: $cmd"
+            bash -c "$cmd"
+          fi
+        fi
+        if [ ! -d node_modules ]; then
+          if [ -f bun.lock ] || [ -f bun.lockb ]; then
+            bun add @socialaize/shared@latest
+            bun install
+          elif [ -f package.json ]; then
+            npm install @socialaize/shared@latest
+            npm install
+          fi
+        fi
+
+    - name: Remove .npmrc before packaging (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      shell: bash
+      run: rm -f .npmrc
+
+    - name: Deploy + activate (prebuilt) via Appwrite API (TS path)
+      if: steps.mode.outputs.is_python != 'true'
+      uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        endpoint: ${{ inputs.appwrite-endpoint }}
+        project-id: ${{ inputs.appwrite-project-id }}
+        api-key: ${{ inputs.appwrite-api-key }}
+        prebuilt: 'true'
+        commands: ':'
+
+    - name: Deploy via Appwrite-side build (Python path)
+      if: steps.mode.outputs.is_python == 'true'
+      uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        endpoint: ${{ inputs.appwrite-endpoint }}
+        project-id: ${{ inputs.appwrite-project-id }}
+        api-key: ${{ inputs.appwrite-api-key }}
+        prebuilt: 'false'
+        commands: ${{ steps.mode.outputs.commands }}
