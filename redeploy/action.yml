@@ -123,6 +123,27 @@ runs:
         //registry.blackleafdigital.com/npm/:_authToken=${ZREG_TOKEN}
         NPMRC
 
+    - name: Build gate — resolve imports before deploy (TS only)
+      if: steps.mode.outputs.is_python != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        had_pkglock=$([ -f package-lock.json ] && echo yes || echo no)
+        npm install --no-audit --no-fund >/dev/null 2>&1
+        ENTRY="$(yq -r '.entrypoint // "src/main.ts"' .fnconfig.yml 2>/dev/null)"
+        case "$ENTRY" in dist/*|build/*) ENTRY="";; esac
+        [ -n "$ENTRY" ] && [ -f "$ENTRY" ] || ENTRY=""
+        [ -z "$ENTRY" ] && [ -f src/main.ts ] && ENTRY=src/main.ts
+        [ -z "$ENTRY" ] && [ -f src/index.ts ] && ENTRY=src/index.ts
+        if [ -z "$ENTRY" ]; then
+          echo "build gate: no source entry found, skipping"
+        else
+          echo "build gate: esbuild resolve $ENTRY"
+          npx --yes esbuild "$ENTRY" --bundle --platform=node --format=esm --outfile=/dev/null --external:@zlogging/* --external:@opentelemetry/* --log-level=error
+        fi
+        rm -rf node_modules
+        [ "$had_pkglock" = no ] && rm -f package-lock.json || true
+
     - name: Deploy + activate (Appwrite-side build) via Appwrite API (TS path)
       if: steps.mode.outputs.is_python != 'true'
       uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
