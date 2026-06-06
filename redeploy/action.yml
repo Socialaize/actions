@@ -63,6 +63,21 @@ runs:
         }
         git push origin main
 
+    - name: Create FNConfig — merge shared template (centralizes buildSpecification etc.)
+      shell: bash
+      env:
+        FN_TEMPLATE: ${{ github.action_path }}/fnconfig.template.yml
+      run: |
+        set -euo pipefail
+        if [ ! -f .fnconfig.yml ]; then
+          echo "::error::.fnconfig.yml missing in $(pwd)"; exit 1
+        fi
+        fid="$(yq '.["$id"] // ""' .fnconfig.yml)"
+        tmpl="$(mktemp)"; sed "s/%FUNCTIONID%/${fid}/g" "$FN_TEMPLATE" > "$tmpl"
+        yq eval-all 'select(fileIndex==0) * select(fileIndex==1)' .fnconfig.yml "$tmpl" > .fnconfig.merged.yml
+        mv .fnconfig.merged.yml .fnconfig.yml
+        echo "=== effective .fnconfig.yml ==="; cat .fnconfig.yml
+
     - name: Detect runtime + select deploy mode
       id: mode
       shell: bash
