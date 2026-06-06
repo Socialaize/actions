@@ -1,0 +1,10 @@
+# Shared FNConfig overrides — merged into each function's .fnconfig.yml at deploy
+# time by the redeploy composite's "Create FNConfig" step. Centralizes deploy knobs
+# so they are not hand-edited in every function repo; change here = applies to all
+# functions on their next redeploy. Placeholders like %FUNCTIONID% are substituted
+# from the repo's existing config.
+#
+# Why s-2vcpu-2gb build spec: the in-container bun/npm install of @socialaize/shared
+# (~229 deps incl @zlogging + OpenTelemetry) OOMs at the 512mb default, so Appwrite
+# reports build status "general_unknown" with no logs.
+buildSpecification: "s-2vcpu-2gb"
