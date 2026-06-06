@@ -2,18 +2,20 @@ name: Force Appwrite redeploy
 description: |
   Merges staging into main, pushes, then deploys to Appwrite.
 
-  TypeScript functions are built **inside GitHub Actions** so the caller's
-  GitHub token can auth to npm.pkg.github.com (private @socialaize scope).
-  Appwrite skips its own build for these (prebuilt: true, commands: ':').
+  Both TypeScript and Python functions build **inside the Appwrite container**
+  (prebuilt: false) — the deploy uploads source only, so there is no node-tar
+  crash on bun's lazily-materialized node_modules and no Alpine/musl vs
+  glibc native-binary mismatch.
 
-  Python functions are built **inside the Appwrite container** (prebuilt:
-  false). The local GH runner is Ubuntu/glibc but Appwrite runs Alpine/musl,
-  so any venv produced in Actions ships non-portable Python binaries. The
-  function's project-level Appwrite GH_TOKEN secret handles cross-repo git
-  clones of @socialaize/shared-py inside the container.
+  For the TS path the composite writes a `.npmrc` with baked, short-lived
+  tokens — `github.token` for the private `@socialaize` GitHub Packages scope
+  and a freshly minted ZRegistry token for the `@zlogging` scope — and SHIPS it
+  in the source tarball (`.npmrc` is not in the CLI's ignore list). Appwrite's
+  in-container `bun install` / `npm install` reads it. The tokens are expired by
+  the time the function actually runs.
 
-  Caller workflows MUST grant `packages: read` permission so the composite
-  can use `github.token` against npm.pkg.github.com (TS path).
+  Caller workflows MUST grant `packages: read` and pass zregistry-client-id /
+  zregistry-client-secret so the `@zlogging` scope can authenticate.
 inputs:
   token:
     description: GitHub token with `repo` scope for the git merge/push (e.g. GH_DISPATCH_TOKEN).
@@ -90,7 +92,7 @@ runs:
           echo 'EOF'
         } >> "$GITHUB_OUTPUT"
 
-    - name: Write .npmrc for npm.pkg.github.com auth (TS only)
+    - name: Write .npmrc (TS only) — baked tokens, shipped in the tarball for the in-container build
       if: steps.mode.outputs.is_python != 'true'
       shell: bash
       env:
@@ -106,56 +108,7 @@ runs:
         //registry.blackleafdigital.com/npm/:_authToken=${ZREG_TOKEN}
         NPMRC
 
-    - name: Setup Bun (TS only)
-      if: steps.mode.outputs.is_python != 'true'
-      uses: oven-sh/setup-bun@v2
-
-    - name: Setup Node (TS only)
-      if: steps.mode.outputs.is_python != 'true'
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22'
-
-    - name: Install + (optional) build function deps (TS only)
-      if: steps.mode.outputs.is_python != 'true'
-      shell: bash
-      env:
-        NODE_OPTIONS: '--max-old-space-size=4096'
-        GH_TOKEN: ${{ inputs.token }}
-        # Appwrite open-runtimes for bun-* and node-* use Alpine (musl), not glibc.
-        # Force npm/bun to install the linuxmusl-x64 native variants (e.g. sharp's
-        # @img/sharp-linuxmusl-x64) so the tarball boots in Appwrite's container.
-        npm_config_platform: linux
-        npm_config_libc: musl
-        npm_config_arch: x64
-        npm_config_target_platform: linux
-        npm_config_target_libc: musl
-        npm_config_target_arch: x64
-      run: |
-        set -euo pipefail
-        if [ -f .fnconfig.yml ]; then
-          cmd="$(yq -r '.commands // ""' .fnconfig.yml 2>/dev/null || echo '')"
-          if [ -n "$cmd" ]; then
-            echo "Running .fnconfig commands: $cmd"
-            bash -c "$cmd"
-          fi
-        fi
-        if [ ! -d node_modules ]; then
-          if [ -f bun.lock ] || [ -f bun.lockb ]; then
-            bun add @socialaize/shared@latest
-            bun install
-          elif [ -f package.json ]; then
-            npm install @socialaize/shared@latest
-            npm install
-          fi
-        fi
-
-    - name: Remove .npmrc before packaging (TS only)
-      if: steps.mode.outputs.is_python != 'true'
-      shell: bash
-      run: rm -f .npmrc
-
-    - name: Deploy + activate (prebuilt) via Appwrite API (TS path)
+    - name: Deploy + activate (Appwrite-side build) via Appwrite API (TS path)
       if: steps.mode.outputs.is_python != 'true'
       uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
       env:
@@ -164,8 +117,8 @@ runs:
         endpoint: ${{ inputs.appwrite-endpoint }}
         project-id: ${{ inputs.appwrite-project-id }}
         api-key: ${{ inputs.appwrite-api-key }}
-        prebuilt: 'true'
-        commands: ':'
+        prebuilt: 'false'
+        commands: ${{ steps.mode.outputs.commands }}
 
     - name: Deploy via Appwrite-side build (Python path)
       if: steps.mode.outputs.is_python == 'true'
