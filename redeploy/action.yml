@@ -59,7 +59,7 @@ runs:
         echo "Merging origin/staging into main"
         git merge --ff-only origin/staging || {
           echo "fast-forward failed; falling back to no-ff merge commit"
-          git merge --no-ff origin/staging -m "Merge staging into main (force redeploy)"
+          git -c merge.ff=false merge --no-ff --no-edit -X theirs origin/staging -m "Merge staging into main (force redeploy)"
         }
         git push origin main
 
