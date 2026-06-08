@@ -9,13 +9,16 @@ description: |
 
   For the TS path the composite writes a `.npmrc` with baked, short-lived
   tokens — `github.token` for the private `@socialaize` GitHub Packages scope
-  and a freshly minted ZRegistry token for the `@zlogging` scope — and SHIPS it
+  and a ZRegistry token for the `@zlogging` scope — and SHIPS it
   in the source tarball (`.npmrc` is not in the CLI's ignore list). Appwrite's
   in-container `bun install` / `npm install` reads it. The tokens are expired by
   the time the function actually runs.
 
-  Caller workflows MUST grant `packages: read` and pass zregistry-client-id /
-  zregistry-client-secret so the `@zlogging` scope can authenticate.
+  ZRegistry auth precedence: the per-repo PAT `zregistry-token` (inherited from
+  the Socialaize org secret ZREGISTRY_TOKEN) is preferred; if absent, the
+  composite falls back to minting a short-lived OIDC client_credentials token
+  from zregistry-client-id / zregistry-client-secret. Caller workflows MUST grant
+  `packages: read`.
 inputs:
   token:
     description: GitHub token with `repo` scope for the git merge/push (e.g. GH_DISPATCH_TOKEN).
@@ -29,11 +32,14 @@ inputs:
   appwrite-api-key:
     description: Appwrite API key (functions.write)
     required: true
+  zregistry-token:
+    description: ZRegistry per-repo PAT (zrg_live_) for the @zlogging read scope. Preferred over the OIDC path; inherited from the Socialaize org secret ZREGISTRY_TOKEN.
+    required: false
   zregistry-client-id:
-    description: ZRegistry/ZAuth OIDC client id (client_credentials) for the @zlogging scope on the TS path.
+    description: Fallback ZRegistry/ZAuth OIDC client id (client_credentials) for the @zlogging scope when zregistry-token is not set.
     required: false
   zregistry-client-secret:
-    description: ZRegistry/ZAuth OIDC client secret for the @zlogging scope on the TS path.
+    description: Fallback ZRegistry/ZAuth OIDC client secret for the @zlogging scope when zregistry-token is not set.
     required: false
 
 runs:
@@ -112,10 +118,15 @@ runs:
       shell: bash
       env:
         NPM_TOKEN: ${{ github.token }}
+        ZREGISTRY_TOKEN: ${{ inputs.zregistry-token }}
         ZREGISTRY_CLIENT_ID: ${{ inputs.zregistry-client-id }}
         ZREGISTRY_CLIENT_SECRET: ${{ inputs.zregistry-client-secret }}
       run: |
-        ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.publish' | jq -r .access_token)
+        ZREG_TOKEN="${ZREGISTRY_TOKEN:-}"
+        if [ -z "$ZREG_TOKEN" ] && [ -n "${ZREGISTRY_CLIENT_ID:-}" ]; then
+          echo "zregistry-token not provided; falling back to OIDC client_credentials mint"
+          ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.publish' | jq -r .access_token)
+        fi
         cat > .npmrc <<NPMRC
         @socialaize:registry=https://npm.pkg.github.com
         //npm.pkg.github.com/:_authToken=${NPM_TOKEN}
