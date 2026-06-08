@@ -134,6 +134,38 @@ runs:
         //registry.blackleafdigital.com/npm/:_authToken=${ZREG_TOKEN}
         NPMRC
 
+    - name: Write .zreg.env (Python only) — baked ZReg PyPI token, shipped in the tarball for the in-container uv/pip build
+      if: steps.mode.outputs.is_python == 'true'
+      shell: bash
+      env:
+        ZREGISTRY_TOKEN: ${{ inputs.zregistry-token }}
+        ZREGISTRY_CLIENT_ID: ${{ inputs.zregistry-client-id }}
+        ZREGISTRY_CLIENT_SECRET: ${{ inputs.zregistry-client-secret }}
+      run: |
+        # The `socialaize-shared` Python package depends on `zlogging`, which lives on the
+        # BlackLeafDigital ZRegistry PyPI index (registry.blackleafdigital.com/pypi/simple/),
+        # NOT pypi.org. The in-container `uv sync` / `pip install` (prebuilt:false) therefore
+        # needs ZReg auth. We bake a short-lived token into `.zreg.env`, ship it in the source
+        # tarball (scripts/build.sh sources it), and the token is expired by the time the
+        # function actually runs — mirrors the TS `.npmrc` pattern.
+        #
+        # uv honors UV_INDEX (extra index, inline creds); pip honors PIP_EXTRA_INDEX_URL.
+        # Preferred: the per-repo PAT `zregistry-token` (read scope, all ecosystems). Fallback:
+        # mint a short-lived OIDC client_credentials packages.read token.
+        ZREG_TOKEN="${ZREGISTRY_TOKEN:-}"
+        if [ -z "$ZREG_TOKEN" ] && [ -n "${ZREGISTRY_CLIENT_ID:-}" ]; then
+          echo "zregistry-token not provided; falling back to OIDC client_credentials mint (packages.read)"
+          ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.read' | jq -r .access_token)
+        fi
+        ZREG_INDEX_URL="https://__token__:${ZREG_TOKEN}@registry.blackleafdigital.com/pypi/simple/"
+        cat > .zreg.env <<ZREGENV
+        # Sourced by scripts/build.sh inside the Appwrite build container. Baked, short-lived.
+        export UV_INDEX="${ZREG_INDEX_URL}"
+        export UV_INDEX_ZREG_USERNAME=__token__
+        export UV_INDEX_ZREG_PASSWORD=${ZREG_TOKEN}
+        export PIP_EXTRA_INDEX_URL="${ZREG_INDEX_URL}"
+        ZREGENV
+
     - name: Build gate — resolve imports before deploy (TS only)
       if: steps.mode.outputs.is_python != 'true'
       shell: bash
