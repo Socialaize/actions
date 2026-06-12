@@ -182,7 +182,7 @@ runs:
           echo "build gate: no source entry found, skipping"
         else
           echo "build gate: esbuild resolve $ENTRY"
-          npx --yes esbuild "$ENTRY" --bundle --platform=node --format=esm --outfile=/dev/null --external:@zlogging/* --external:@opentelemetry/* --log-level=error
+          npx --yes esbuild "$ENTRY" --bundle --platform=node --format=esm --outfile=/dev/null --external:@zlogging/* --external:@opentelemetry/* --external:bun --log-level=error
         fi
         rm -rf node_modules
         [ "$had_pkglock" = no ] && rm -f package-lock.json || true
