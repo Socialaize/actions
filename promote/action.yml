@@ -1,10 +1,24 @@
 name: Promote function staging to main
 description: |
   Syncs .fnconfig.yml to Appwrite, fast-forwards main to the staging tip and
-  pushes, then uploads + activates a deployment via the Appwrite API. We
+  pushes, then deploys via the shared `Socialaize/actions/deploy` composite. We
   drive the deployment ourselves rather than relying on Appwrite's VCS
   auto-deploy — it lands every deployment in silent mode (activate=false),
   which is the bug this action exists to work around.
+
+  The build+deploy half (FNConfig template merge, runtime detection, baked
+  `.npmrc`/`.zreg.env` registry auth, esbuild gate, deploy-functions) lives in
+  `Socialaize/actions/deploy@main` and is SHARED with `redeploy`. Previously
+  promote carried its own stale deploy step (a bare `sync-fn --mode deploy` with
+  no `.npmrc`/`.zreg.env`/build-spec), so a promote-driven deploy failed the
+  Appwrite build for every function with `@zlogging`/`zlogging` deps while
+  redeploy (which had the auth) succeeded. Sharing the half fixes that for good.
+
+  ZRegistry auth precedence: the per-repo PAT `zregistry-token` (inherited from
+  the Socialaize org secret ZREGISTRY_TOKEN) is preferred; if absent, the deploy
+  composite falls back to minting a short-lived OIDC client_credentials token
+  from zregistry-client-id / zregistry-client-secret. Caller workflows MUST grant
+  `packages: read`.
 inputs:
   commit-sha:
     description: SHA to merge into main. Defaults to origin/staging tip.
@@ -22,6 +36,15 @@ inputs:
   appwrite-api-key:
     description: Appwrite API key (functions.write)
     required: true
+  zregistry-token:
+    description: ZRegistry per-repo PAT (zrg_live_) for the @zlogging read scope. Preferred over the OIDC path; inherited from the Socialaize org secret ZREGISTRY_TOKEN.
+    required: false
+  zregistry-client-id:
+    description: Fallback ZRegistry/ZAuth OIDC client id (client_credentials) for the @zlogging scope when zregistry-token is not set.
+    required: false
+  zregistry-client-secret:
+    description: Fallback ZRegistry/ZAuth OIDC client secret for the @zlogging scope when zregistry-token is not set.
+    required: false
 
 runs:
   using: composite
@@ -81,11 +104,12 @@ runs:
         }
         git push origin main
 
-    - name: Deploy + activate via Appwrite API
-      uses: Socialaize/actions/sync-fn@main
+    - name: Build + deploy to Appwrite (shared)
+      uses: Socialaize/actions/deploy@main
       with:
-        mode: deploy
-        activate: 'true'
         appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
         appwrite-project-id: ${{ inputs.appwrite-project-id }}
         appwrite-api-key: ${{ inputs.appwrite-api-key }}
+        zregistry-token: ${{ inputs.zregistry-token }}
+        zregistry-client-id: ${{ inputs.zregistry-client-id }}
+        zregistry-client-secret: ${{ inputs.zregistry-client-secret }}

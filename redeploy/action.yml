@@ -1,23 +1,17 @@
 name: Force Appwrite redeploy
 description: |
-  Merges staging into main, pushes, then deploys to Appwrite.
+  Merges staging into main, pushes, then deploys to Appwrite via the shared
+  `Socialaize/actions/deploy` composite (build+activate, Appwrite-side build).
 
-  Both TypeScript and Python functions build **inside the Appwrite container**
-  (prebuilt: false) — the deploy uploads source only, so there is no node-tar
-  crash on bun's lazily-materialized node_modules and no Alpine/musl vs
-  glibc native-binary mismatch.
-
-  For the TS path the composite writes a `.npmrc` with baked, short-lived
-  tokens — `github.token` for the private `@socialaize` GitHub Packages scope
-  and a ZRegistry token for the `@zlogging` scope — and SHIPS it
-  in the source tarball (`.npmrc` is not in the CLI's ignore list). Appwrite's
-  in-container `bun install` / `npm install` reads it. The tokens are expired by
-  the time the function actually runs.
+  The build+deploy half (FNConfig template merge, runtime detection, baked
+  `.npmrc`/`.zreg.env` registry auth, esbuild gate, deploy-functions) lives in
+  `Socialaize/actions/deploy@main` and is SHARED with `promote` so the two can
+  never drift again.
 
   ZRegistry auth precedence: the per-repo PAT `zregistry-token` (inherited from
-  the Socialaize org secret ZREGISTRY_TOKEN) is preferred; if absent, the
-  composite falls back to minting a short-lived OIDC client_credentials token
-  from zregistry-client-id / zregistry-client-secret. Caller workflows MUST grant
+  the Socialaize org secret ZREGISTRY_TOKEN) is preferred; if absent, the deploy
+  composite falls back to minting a short-lived OIDC client_credentials token from
+  zregistry-client-id / zregistry-client-secret. Caller workflows MUST grant
   `packages: read`.
 inputs:
   token:
@@ -69,144 +63,12 @@ runs:
         }
         git push origin main
 
-    - name: Create FNConfig — merge shared template (centralizes buildSpecification etc.)
-      shell: bash
-      env:
-        FN_TEMPLATE: ${{ github.action_path }}/fnconfig.template.yml
-      run: |
-        set -euo pipefail
-        if [ ! -f .fnconfig.yml ]; then
-          echo "::error::.fnconfig.yml missing in $(pwd)"; exit 1
-        fi
-        fid="$(yq '.["$id"] // ""' .fnconfig.yml)"
-        tmpl="$(mktemp)"; sed "s/%FUNCTIONID%/${fid}/g" "$FN_TEMPLATE" > "$tmpl"
-        yq eval-all 'select(fileIndex==0) * select(fileIndex==1)' .fnconfig.yml "$tmpl" > .fnconfig.merged.yml
-        mv .fnconfig.merged.yml .fnconfig.yml
-        echo "=== effective .fnconfig.yml ==="; cat .fnconfig.yml
-
-    - name: Detect runtime + select deploy mode
-      id: mode
-      shell: bash
-      run: |
-        set -euo pipefail
-        runtime=""
-        cmd=""
-        if [ -f .fnconfig.yml ]; then
-          runtime="$(yq -r '.runtime // ""' .fnconfig.yml 2>/dev/null || echo '')"
-          cmd="$(yq -r '.commands // ""' .fnconfig.yml 2>/dev/null || echo '')"
-        fi
-        echo "Detected runtime: $runtime"
-        echo "Detected commands: $cmd"
-        case "$runtime" in
-          python*|*python*)
-            is_python=true
-            ;;
-          *)
-            is_python=false
-            ;;
-        esac
-        echo "is_python=$is_python" >> "$GITHUB_OUTPUT"
-        # Quote commands for downstream consumers — empty string allowed.
-        {
-          echo 'commands<<EOF'
-          echo "$cmd"
-          echo 'EOF'
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Write .npmrc (TS only) — baked tokens, shipped in the tarball for the in-container build
-      if: steps.mode.outputs.is_python != 'true'
-      shell: bash
-      env:
-        NPM_TOKEN: ${{ github.token }}
-        ZREGISTRY_TOKEN: ${{ inputs.zregistry-token }}
-        ZREGISTRY_CLIENT_ID: ${{ inputs.zregistry-client-id }}
-        ZREGISTRY_CLIENT_SECRET: ${{ inputs.zregistry-client-secret }}
-      run: |
-        ZREG_TOKEN="${ZREGISTRY_TOKEN:-}"
-        if [ -z "$ZREG_TOKEN" ] && [ -n "${ZREGISTRY_CLIENT_ID:-}" ]; then
-          echo "zregistry-token not provided; falling back to OIDC client_credentials mint"
-          ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.publish' | jq -r .access_token)
-        fi
-        cat > .npmrc <<NPMRC
-        @socialaize:registry=https://npm.pkg.github.com
-        //npm.pkg.github.com/:_authToken=${NPM_TOKEN}
-        @zlogging:registry=https://registry.blackleafdigital.com/npm/
-        //registry.blackleafdigital.com/npm/:_authToken=${ZREG_TOKEN}
-        NPMRC
-
-    - name: Write .zreg.env (Python only) — baked ZReg PyPI token, shipped in the tarball for the in-container uv/pip build
-      if: steps.mode.outputs.is_python == 'true'
-      shell: bash
-      env:
-        ZREGISTRY_TOKEN: ${{ inputs.zregistry-token }}
-        ZREGISTRY_CLIENT_ID: ${{ inputs.zregistry-client-id }}
-        ZREGISTRY_CLIENT_SECRET: ${{ inputs.zregistry-client-secret }}
-      run: |
-        # The `socialaize-shared` Python package depends on `zlogging`, which lives on the
-        # BlackLeafDigital ZRegistry PyPI index (registry.blackleafdigital.com/pypi/simple/),
-        # NOT pypi.org. The in-container `uv sync` / `pip install` (prebuilt:false) therefore
-        # needs ZReg auth. We bake a short-lived token into `.zreg.env`, ship it in the source
-        # tarball (scripts/build.sh sources it), and the token is expired by the time the
-        # function actually runs — mirrors the TS `.npmrc` pattern.
-        #
-        # uv honors UV_INDEX (extra index, inline creds); pip honors PIP_EXTRA_INDEX_URL.
-        # Preferred: the per-repo PAT `zregistry-token` (read scope, all ecosystems). Fallback:
-        # mint a short-lived OIDC client_credentials packages.read token.
-        ZREG_TOKEN="${ZREGISTRY_TOKEN:-}"
-        if [ -z "$ZREG_TOKEN" ] && [ -n "${ZREGISTRY_CLIENT_ID:-}" ]; then
-          echo "zregistry-token not provided; falling back to OIDC client_credentials mint (packages.read)"
-          ZREG_TOKEN=$(curl -s -u "$ZREGISTRY_CLIENT_ID:$ZREGISTRY_CLIENT_SECRET" -X POST https://auth.blackleafdigital.com/v1/oidc/token -d grant_type=client_credentials -d 'scope=packages.read' | jq -r .access_token)
-        fi
-        ZREG_INDEX_URL="https://__token__:${ZREG_TOKEN}@registry.blackleafdigital.com/pypi/simple/"
-        cat > .zreg.env <<ZREGENV
-        # Sourced by scripts/build.sh inside the Appwrite build container. Baked, short-lived.
-        export UV_INDEX="${ZREG_INDEX_URL}"
-        export UV_INDEX_ZREG_USERNAME=__token__
-        export UV_INDEX_ZREG_PASSWORD=${ZREG_TOKEN}
-        export PIP_EXTRA_INDEX_URL="${ZREG_INDEX_URL}"
-        ZREGENV
-
-    - name: Build gate — resolve imports before deploy (TS only)
-      if: steps.mode.outputs.is_python != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        had_pkglock=$([ -f package-lock.json ] && echo yes || echo no)
-        npm install --no-audit --no-fund >/dev/null 2>&1
-        ENTRY="$(yq -r '.entrypoint // "src/main.ts"' .fnconfig.yml 2>/dev/null)"
-        case "$ENTRY" in dist/*|build/*) ENTRY="";; esac
-        [ -n "$ENTRY" ] && [ -f "$ENTRY" ] || ENTRY=""
-        [ -z "$ENTRY" ] && [ -f src/main.ts ] && ENTRY=src/main.ts
-        [ -z "$ENTRY" ] && [ -f src/index.ts ] && ENTRY=src/index.ts
-        if [ -z "$ENTRY" ]; then
-          echo "build gate: no source entry found, skipping"
-        else
-          echo "build gate: esbuild resolve $ENTRY"
-          npx --yes esbuild "$ENTRY" --bundle --platform=node --format=esm --outfile=/dev/null --external:@zlogging/* --external:@opentelemetry/* --external:bun --log-level=error
-        fi
-        rm -rf node_modules
-        [ "$had_pkglock" = no ] && rm -f package-lock.json || true
-
-    - name: Deploy + activate (Appwrite-side build) via Appwrite API (TS path)
-      if: steps.mode.outputs.is_python != 'true'
-      uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
-      env:
-        GH_TOKEN: ${{ github.token }}
+    - name: Build + deploy to Appwrite (shared)
+      uses: Socialaize/actions/deploy@main
       with:
-        endpoint: ${{ inputs.appwrite-endpoint }}
-        project-id: ${{ inputs.appwrite-project-id }}
-        api-key: ${{ inputs.appwrite-api-key }}
-        prebuilt: 'false'
-        commands: ${{ steps.mode.outputs.commands }}
-
-    - name: Deploy via Appwrite-side build (Python path)
-      if: steps.mode.outputs.is_python == 'true'
-      uses: ZachHandley/AppwriteUtils/actions/deploy-functions@dev
-      env:
-        GH_TOKEN: ${{ github.token }}
-      with:
-        endpoint: ${{ inputs.appwrite-endpoint }}
-        project-id: ${{ inputs.appwrite-project-id }}
-        api-key: ${{ inputs.appwrite-api-key }}
-        prebuilt: 'false'
-        commands: ${{ steps.mode.outputs.commands }}
+        appwrite-endpoint: ${{ inputs.appwrite-endpoint }}
+        appwrite-project-id: ${{ inputs.appwrite-project-id }}
+        appwrite-api-key: ${{ inputs.appwrite-api-key }}
+        zregistry-token: ${{ inputs.zregistry-token }}
+        zregistry-client-id: ${{ inputs.zregistry-client-id }}
+        zregistry-client-secret: ${{ inputs.zregistry-client-secret }}
